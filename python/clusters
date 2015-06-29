@@ -1,0 +1,248 @@
+#!/usr/bin/env python
+
+"""Create figure of cluster sizes versus time. Note that the last column of data
+   contains the number of clusters which are larger than those explicitly
+   counted (i.e., the plus sizes)."""
+
+import sys
+import os
+import glob
+import shutil
+import time
+import getopt
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import numpy as np
+
+def usage():
+  print 'clusters:'
+  print '  -h, --help      Help menu'
+  print '  -x              Value of control parameter'
+  print '  -N              Total number of particles (obtained automatically by glob)'
+  print '  -p, --phi       Volume fraction (default is 0.0025)'
+  print '  -L              Average bond length (default is 0.5)'
+  print '  -t              Add to beginning of title in \mathrm{}'
+  print '  -o              Outfile modifier (clusters_x-#_{}.dat)'
+  print '  -n              Flag to plot average number of bonds per cluster'
+  print '  -u              Upper limit for xlim'
+  print '  --pdf           Flag to write PDF'
+  print '  --tetra         Flag to plot tetrahedrons from clusterStat.dat'
+  print '  --cube          Flag to plot cubes from clusterStat.dat'
+  print '  --dodecahedron  Flag to plot dodecahedrons from clusterStats.dat'
+  print '  --pyramid       Flag to plot pyramids from clusterStats.dat'
+  print '  --box           Flag to plat orthorhombic box from clusterStats.dat'
+  print ''
+
+try:
+  options, args = getopt.getopt(sys.argv[1:], 'hx:N:p:L:t:o:nu:',
+                                ['help', 'phi', 'pdf', 'tetra', 'cube', 'dodecahedron', 'pyramid', 'box'])
+except getopt.GetoptError, err:
+  print str(err)
+  usage()
+  sys.exit(2)
+
+plt.rcParams['text.usetex'] = True
+plt.rcParams['axes.linewidth'] = 0.5
+plt.rcParams['axes.titlesize'] = 6
+plt.rcParams['axes.labelsize'] = 8
+plt.rcParams['xtick.labelsize'] = 6
+plt.rcParams['ytick.labelsize'] = 6
+plt.rcParams['font.size'] = 6
+plt.rcParams['legend.numpoints'] = 1
+plt.rcParams['legend.fontsize'] = 4
+plt.rcParams['legend.borderaxespad'] = 1
+plt.rcParams['lines.linewidth'] = 0.5
+plt.rcParams['lines.markersize'] = 3
+
+# defaults
+x = ''
+N = ''
+L = '0.5'
+phi = '0.0025'
+title = ''
+out = ''
+xmax = ''
+averageBondsPerCluster = False
+showTetra = False
+showCube = False
+showDodecahedron = False
+showPyramid = False
+showBox = False
+pdf = False
+
+script_file = 'octopus.in'
+if (os.path.isfile(script_file)):
+  f = open(script_file)
+  data = f.readlines()
+  f.close()
+  for d in data:
+    if ('xij' in d and '#' not in d):
+      x = d.split()[1]
+
+for option, value in options:
+  if option in ('-h', '--help'):
+    usage()
+    sys.exit(1)
+  elif option in ('-x'):
+    x = value
+  elif option in ('-N'):
+    N = value
+  elif option in ('-L'):
+    L = value
+  elif option in ('-p', '--phi'):
+    phi = value
+  elif option in ('-t'):
+    title = value
+  elif option in ('-o'):
+    out = value
+  elif option in ('-n'):
+    averageBondsPerCluster = True
+  elif option in ('-u'):
+    xmax = float(value)
+  elif option in ('-f', '--pdf'):
+    pdf = True
+  elif option in ('--cube'):
+    showCube = True
+  elif option in ('--dodecahedron'):
+    showDodecahedron = True
+  elif option in ('--pyramid'):
+    showPyramid = True
+  elif option in ('--box'):
+    showBox = True
+  elif option in ('--tetra'):
+    showTetra = True
+  else:
+    assert False, 'Command line error.'
+
+def get_data(f_, c_):
+  f = open(f_)
+  data = f.readlines()
+  f.close()
+  data = filter(lambda u: u.expandtabs().strip().replace(' ', '').replace('.', '').replace('-', '').replace('e+', '').isdigit(), data)
+  x = []
+  for d in data:
+    d_split = d.split()
+    if (c_ < len(d_split)):
+      x.append(float(d_split[c_]))
+    else:
+      x.append(0)
+  return x
+
+# figure out value of N
+if (N == ''):
+  nfiles = glob.glob('N*.*')
+  if (len(nfiles) > 0):
+    N = nfiles[0][nfiles[0].index('N') + 1:nfiles[0].index('P')]
+
+# read file and make arrays
+f = open('clusterSizes.dat', 'r')
+line = f.readline()
+max_cluster_size = len(line.split()) - 2 # subtract time column and plus sizes column
+print 'max_cluster_size =', max_cluster_size
+for i in range(max_cluster_size + 2):
+  exec('n' + str(i) + ' = []')
+while 1:
+  data = line.split()
+  n0.append(int(eval(data[0]))) # needed to deal with scientific notation
+  for i in range(1, max_cluster_size + 2):
+    exec('n' + str(i) + '.append(' + data[i] + ')')
+  line = f.readline()
+  if not line: break
+f.close()
+print 'done reading file'
+
+# check that list lengths are the same
+time_length = len(n0)
+for i in range(1, max_cluster_size + 2):
+  exec('if (len(n' + str(i) + ') != time_length): print i, \'not same length as time\'')
+
+n0 = np.array(n0) / 1e5
+exec('n' + str(max_cluster_size) + ' = np.array(' + 'n' + str(max_cluster_size) + ') + np.array(n' + str(max_cluster_size + 1) + ')')
+
+if (showTetra or showCube or showDodecahedron or showPyramid or showBox):
+  tmp2 = 'clusterStats.dat'
+  tshow = np.array(get_data(tmp2, 0)) / 1e5
+  tetra = np.array(get_data(tmp2, 1))
+  cubes = np.array(get_data(tmp2, 2))
+  dodecahedrons = np.array(get_data(tmp2, 3))
+  c60 = np.array(get_data(tmp2, 4))
+  pyramids = np.array(get_data(tmp2, 5))
+
+# agg << t_ * dt_ << " " << tetrahedrons << " "
+#                        << cubes << " "
+#                        << dodecahedrons << " "
+#                        << truncatedIcosahedrons << " "
+#                        << pyramids24 + pyramids32 << " "
+#                        << pyramids62 << " "
+#                        << pyramids64 << " "
+#                        << pyramids66 << " "
+#                        << box << std::endl;
+
+w = 8.0 / 2.54
+h = (3.0 / 4.0) * w
+w = 2.5 * w
+h = 2 * h
+
+fig = plt.figure(1, figsize=(w, h))
+if (title != ''):
+  plt.figtext(0.50, 0.92, r'$\mathrm{' + title + '}' + '~N=' + N + ',~L=' + L + ',~\phi=' + phi + ',~k=50,~x=' + x + '$', ha='center')
+else:
+  plt.figtext(0.50, 0.92, r'$N=' + N + ',~L=' + L + ',~\phi=' + phi + ',~k=50,~x=' + x + '$', ha='center')
+plt.figtext(0.02, 0.95, time.asctime(), fontsize=4, color='0.75')
+plt.figtext(0.02, 0.96, os.getcwd().replace('_', '\_'), fontsize=4, color='0.75')
+ct = 0
+sumpct = 0.0
+num_horizontal_plots = 7
+num_vertical_plots = 5
+max_plots = num_horizontal_plots * num_vertical_plots
+for i in range(1, num_vertical_plots + 1):
+  for j in range(1, num_horizontal_plots + 1):
+    ct += 1
+    if (ct <= max_cluster_size and ct <= max_plots):
+      ax = fig.add_subplot(5, 7, ct)
+      if (ct == max_cluster_size): exec('plt.plot(n0, n' + str(ct) + ', \'k-\', label=r\'$' + str(ct) + '+$\')')
+      else: exec('plt.plot(n0, n' + str(ct) + ', \'k-\', label=r\'$' + str(ct) + '$\')')
+      if (N != ''):
+	# percentage of total
+	exec('pct = \'%.1f\' % (100.0 * ct * n' + str(ct) + '[-1] / eval(N))')
+	if (ct != max_cluster_size): exec('sumpct += 100.0 * ct * n' + str(ct) + '[-1] / eval(N)')
+	if (ct == max_cluster_size): pct = '%.1f' % (100.0 - sumpct)
+	if (pct != '0.0'): exec('plt.text(0.975, 1.025, r\'$\mathrm{' + pct + '\%}$\', fontsize=4, color=\'k\', transform = ax.transAxes, ha=\'right\')')
+	# average number of bonds per cluster
+	if (os.path.isfile('averageBondsPerCluster.dat') and averageBondsPerCluster):
+	  exec('pct = \'%.1f\' % (avebonds' + str(ct) + '[-1])')
+	  if (eval(pct) > 0.001): exec('plt.text(0.05, 1.025, r\'$\langle n \\rangle=\mathrm{' + pct + '}$\', fontsize=4, color=\'k\', transform = ax.transAxes, ha=\'left\')')
+      if (ct == 4 and showTetra): plt.plot(tshow, tetra, 'y-')
+      if (ct == 8 and showCube): plt.plot(tshow, cubes, 'y-')
+      if (ct == 20 and showDodecahedron): plt.plot(tshow, dodecahedrons, 'y-')
+      if (ct == 14 and showPyramid): plt.plot(tshow, pyramids, 'y-')
+      exec('mx = max(n' + str(ct) + ')')
+      if (xmax != ''): plt.xlim(0, xmax)
+      if (mx <= 5): plt.ylim(0, 5)
+      elif (mx <= 10): plt.ylim(0, 10)
+      lg = plt.legend(loc='upper left', handlelength=0.0)
+      lg.get_frame().set_linewidth(0.5)
+      exec('ymax = n' + str(ct) + '[-1]')
+      if (ymax <= 5): plt.setp(ax.patch, color=(1.0, 1.0, 1.0))
+      elif (5 < ymax <= 10): plt.setp(ax.patch, color=(0.8, 0.8, 0.8))
+      else: plt.setp(ax.patch, color=(0.4, 0.4, 0.4))
+
+    if (i == num_vertical_plots): plt.xlabel(r'$t/10^5~\tau_t$')
+    if (j == 1): plt.ylabel(r'$\mathrm{count}$')
+    if (i != num_vertical_plots): plt.setp(ax.get_xticklabels(), visible=False)
+    if (i == num_vertical_plots): plt.setp(ax.get_xticklabels()[::2], visible=False)
+
+fig.subplots_adjust(left=0.1, right=0.9, bottom=0.1, top=0.9, wspace=0.4, hspace=0.3)
+
+outfile = 'clusters_x' + x + '_' + out
+plt.savefig(outfile + '.png', dpi=200)
+if (x == '' and out == '' and title == ''):
+  os.system('display ' + outfile + '.png\n')
+  os.system('rm ' + outfile + '.png')
+else:
+  os.system('display ' + outfile + '.png&\n')
+if (pdf):
+  for ax in fig.axes:
+    plt.setp(ax.patch, color=(1.0, 1.0, 1.0))
+  plt.savefig(outfile + '.pdf')

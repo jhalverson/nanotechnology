@@ -1,0 +1,61 @@
+#!/usr/bin/env python
+
+"""This script creates fade in and fade out effects for animations by wrapping ImageMagick."""
+
+import sys
+import os
+import getopt
+import glob
+
+def usage():
+  print 'fade:'
+  print '  -h, --help    Help menu'
+  print '  -i, --in      Flag for a fade in'
+  print '  -o, --out     Flag for a fade out'
+  print '  -n, --number  Number of files to use per fade (default n=5)'
+  print '  -b, --black   Trend to black (default white)'
+
+try:
+  options, args = getopt.getopt(sys.argv[1:], 'hion:w', ['help', 'in', 'out', 'number=', 'black'])
+except getopt.GetoptError, err:
+  print str(err)
+  usage()
+  sys.exit(2)
+
+# defaults
+fade_in = False
+fade_out = False
+number = 5
+color = 'white'
+
+for option, value in options:
+  if option in ('-h', '--help'):
+    usage()
+    sys.exit()
+  elif option in ('-i', '--in'):
+    fade_in = True
+  elif option in ('-o', '--out'):
+    fade_out = True
+  elif option in ('-n', '--number'):
+    number = int(value)
+  elif option in ('-b', '--black'):
+    color = 'black'
+  else:
+    assert False, 'Command line error.'
+
+files = glob.glob('*.png')
+files = filter(lambda u: u[:u.rindex('.')].isdigit(), files)
+files.sort(lambda u, v: cmp(int(u[:u.rindex('.')]), int(v[:v.rindex('.')])))
+print files
+
+if (fade_in):
+  for i, f in enumerate(files[:number]):
+    percent = 100 - int(100 * float(i) / number)
+    print f, percent
+    os.system('convert ' + f + ' -fill ' + color + ' -colorize ' + str(percent) + '% ' + f)
+
+if (fade_out):
+  for i, f in enumerate(files[-number:]):
+    percent = int(100.0 * float(i + 1) / number)
+    print f, percent
+    os.system('convert ' + f + ' -fill ' + color + ' -colorize ' + str(percent) + '% ' + f)
