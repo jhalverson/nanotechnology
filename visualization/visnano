@@ -1,0 +1,550 @@
+#!/usr/bin/env python
+
+"""
+This script loops over the specified configuration files
+making ray-traced images using PyMol. Particle types are
+assumed to be >= 0 while site types may be \pm some integer
+or zero.
+"""
+
+import sys
+import os
+import time
+import random
+import getopt
+import glob
+
+def usage():
+  print 'visnano:'
+  print '  -h, --help        Help menu'
+  print '  -f, --file        Input file or base file name'
+  print '  -a  --animate     Flag to animate the PNG files'
+  print '  -v, --view        Flag to get the view from pymol.view'
+  print '  -r  --ray         Flag to ray trace the PNG image'
+  print '  -o  --only        Flag to only animate existing PNG files'
+  print '  -l, --leave       Flag to leave the temporary PyMol files'
+  print '  -p, --png         Flag to create a PNG image and quit'
+  print '  -u, --unwrap      Flag to unwrap coordinates around first particle'
+  print '  -n, --no-label    Flag to not write label'
+  print '  -c, --colorshift  Shift particle type indices to change colors'
+  print '  -y, --ylabel      Scale factor for y-coordinate of label'
+  print ''
+
+try:
+  options, args = getopt.getopt(sys.argv[1:], 'hf:praovluc:ny:', \
+                                ['help', 'file=', 'png', 'ray', 'animate', 'only', \
+                                 'view', 'leave', 'unwrap', 'no-label', 'colorshift', 'ylabel'])
+except getopt.GetoptError, err:
+  print str(err)
+  usage()
+  sys.exit(2)
+
+# script parameters
+sf = 1.0
+sn_magn = 0.25
+
+# defaults
+files = []
+png = False
+ray = False
+animate = False
+animate_only = False
+only = False
+view_file = False
+leave = False
+unwrap = False
+write_label = True
+colorShift = 0
+ylabel = 1.21
+
+for option, value in options:
+  if option in ('-h', '--help'):
+    usage()
+    sys.exit(1)
+  elif option in ('-f', '--file'):
+    files = [value]
+  elif option in ('-p', '--png'):
+    png = True
+  elif option in ('-r', '--ray'):
+    ray = True
+  elif option in ('-a', '--animate'):
+    animate = True
+  elif option in ('-o', '--only'):
+    animate_only = True
+  elif option in ('-v', '--view'):
+    view_file = True
+  elif option in ('-l', '--leave'):
+    leave = True
+  elif option in ('-u', '--unwrap'):
+    unwrap = True
+  elif option in ('-n', '--no-label'):
+    write_label = False
+  elif option in ('-c', '--colorshift'):
+    colorShift = int(value)
+  elif option in ('-y', '--ylabel'):
+    ylabel = float(value)
+  else:
+    assert False, 'Command line error.'
+
+if (files == []):
+  files = glob.glob('*.*')
+  files = filter(lambda u: u[u.rindex('.') + 1:].isdigit(), files)
+  files.sort(lambda u, v: cmp(int(u[u.rindex('.') + 1:]), int(v[v.rindex('.') + 1:])))
+  #files = files[:10]
+  if (files == []):
+    if (glob.glob('start.*') == []):
+      sys.stdout.write('ERROR: No files found. Exiting ...\n')
+      sys.exit(1)
+    else:
+      files = [glob.glob('start.*')[0]]
+  if (not animate and not animate_only): files = [files[-1]]
+else:
+  if (not os.path.isfile(files[0])):
+    sys.stdout.write('ERROR: Input file (' + files[0] + ') not found. Exiting ...\n')
+
+# set view
+if (view_file):
+  if (os.path.isfile('pymol.view')):
+    f = open('pymol.view')
+    data_v = f.readlines()
+    f.close()
+    v = ''
+    for d in data_v:
+      if ('ylabel' not in d): v = v + d
+      else: exec(d)
+  else:
+    sys.stdout.write('ERROR: pymol.view does not exist. Exiting ...\n')
+    sys.exit(1)
+
+# create list of colors
+random.seed(12345)
+colors100 = []
+for i in range(200):
+  r = random.random()
+  g = random.random()
+  b = random.random()
+  colors100.append('[%4.3f, %4.3f, %4.3f]' % (r, g, b))
+
+class Site(object):
+  """DNA site on surface of particle. Note that dx, dy, dz are not needed."""
+  def __init__(self, id_, type_, bonded_, x_, y_, z_):
+    self.id = id_
+    self.type = type_
+    self.bonded = bonded_
+    self.x = x_
+    self.y = y_
+    self.z = z_
+
+class Particle(object):
+  """Nanoparticle which includes a list of Sites."""
+  def __init__(self, id_, type_, radius_, x_, y_, z_):
+    self.id = id_
+    self.type = type_
+    self.radius = radius_
+    self.x = x_
+    self.y = y_
+    self.z = z_
+    self.sites = []
+
+# PDB format string
+pdb = '%6s%5d%5s%4s%6d%12.3f%8.3f%8.3f\n'
+
+def strip_int(line_):
+  return int(line_[line_.find('>') + 1: line_.rfind('<')])
+
+def strip_float(line_):
+  return float(line_[line_.find('>') + 1: line_.rfind('<')])
+
+if (not animate_only):
+  for f in files:
+    particles = []
+    bonds = []
+    files_to_delete = []
+    cfg = open(f)
+    while 1:
+      line = cfg.readline()
+      if not line: break
+      if (len(line) != 1):
+	tag = line[line.find('<'): line.find('>') + 1]
+	if (tag == '<step>'):
+	  step = strip_int(line)
+	elif (tag == '<steps>'):
+	  steps = strip_int(line)
+	elif (tag == '<timestep>'):
+	  dt = strip_float(line)
+	elif (tag == '<boxSide>'):
+	  boxSide = strip_float(line)
+	elif (tag == '<averageBondLength>'):
+	  L = strip_float(line)
+	elif (tag == '<numberOfParticles>'):
+	  numberOfParticles = strip_int(line)
+	elif (tag == '<numberOfParticleTypes>'):
+	  numberOfParticleTypes = strip_int(line)
+	elif (tag == '<numberOfSiteTypes>'):
+	  numberOfSiteTypes = strip_int(line)
+	elif (tag == '<id>'):
+	  id = strip_int(line)
+	elif (tag == '<type>'):
+	  type = strip_int(line)
+	elif (tag == '<radius>'):
+	  radius = strip_float(line)
+	elif (tag == '<x>'):
+	  x = strip_float(line)
+	elif (tag == '<y>'):
+	  y = strip_float(line)
+	elif (tag == '<z>'):
+	  z = strip_float(line)
+	elif (tag == '<numberOfSites>'):
+	  p = Particle(id, type, radius, x, y, z)
+	  particles.append(p)
+	  sites = []
+	elif (tag == '<bonded>'):
+	  bonded = strip_int(line)
+	elif (tag == '</site>'):
+	  s = Site(id, type, bonded, x, y, z)
+	  sites.append(s)
+	elif (tag == '</particle>'):
+	  particles[-1].sites = sites
+	elif (tag == '<numberOfBonds>'):
+	  num_bonds = strip_int(line)
+	elif (tag == '<i>'):
+	  pi = strip_int(line)
+	elif (tag == '<a>'):
+	  sa = strip_int(line)
+	elif (tag == '<j>'):
+	  pj = strip_int(line)
+	elif (tag == '<b>'):
+	  sb = strip_int(line)
+	elif (tag == '</bond>'):
+	  q = (pi, sa, pj, sb)
+	  bonds.append(q)
+	elif (tag == '<particle>' or tag == '<site>' or tag == '<bond>' or \
+              tag == '<bonds>' or tag == '</bonds>' or tag == '<numberOfExcludedBonds>' or \
+              tag == '<exclude>' or tag == '</exclude>'):
+	  pass
+	else:
+	  sys.stdout.write('WARNING: ' + tag + ': tag in configuration file was ignored.\n')
+
+    ######################################
+    # have the coordinates at this point #
+    ######################################
+
+    if (unwrap):
+      """Unwrap particles based on position of first particle. Assumption
+         is that structure is a compact sphere."""
+      x0 = particles[0].x
+      y0 = particles[0].y
+      z0 = particles[0].z
+      for p in particles[1:]:
+        rmin = 1e12
+        for i in [-1, 0, 1]:
+          for j in [-1, 0, 1]:
+            for k in [-1, 0, 1]:
+              x_ = p.x + i * boxSide
+              y_ = p.y + j * boxSide
+              z_ = p.z + k * boxSide
+              rijsq = (x0 - x_)**2 + (y0 - y_)**2 + (z0 - z_)**2
+              if (rijsq < rmin):
+                rmin = rijsq
+                (i_, j_, k_) = (i, j, k)
+        p.x = p.x + i_ * boxSide
+        p.y = p.y + j_ * boxSide
+        p.z = p.z + k_ * boxSide
+        for s in p.sites:
+          s.x = s.x + i_ * boxSide
+          s.y = s.y + j_ * boxSide
+          s.z = s.z + k_ * boxSide
+      xcm = 0.0
+      ycm = 0.0
+      zcm = 0.0
+      for p in particles:
+        xcm += p.x
+        ycm += p.y
+        zcm += p.z
+      xcm = xcm / len(particles)
+      ycm = ycm / len(particles)
+      zcm = zcm / len(particles)
+      for p in particles:
+        p.x = p.x - xcm + 0.5 * boxSide
+        p.y = p.y - ycm + 0.5 * boxSide
+        p.z = p.z - zcm + 0.5 * boxSide
+        for s in p.sites:
+          s.x = s.x - xcm + 0.5 * boxSide
+          s.y = s.y - ycm + 0.5 * boxSide
+          s.z = s.z - zcm + 0.5 * boxSide
+
+    # find number of particle and site types
+    particleTypes = []
+    siteTypes = []
+    for p in particles:
+      if (p.type not in particleTypes): particleTypes.append(p.type)
+      for s in p.sites:
+	if (s.type not in siteTypes): siteTypes.append(s.type)
+    numberOfParticleTypes = len(particleTypes)
+    numberOfSiteTypes = len(siteTypes)
+ 
+    atom_types = ['C', 'F', 'O', 'N', 'H', 'S', 'X', 'Y'] + 60 * ['C']
+
+    # write out particles
+    for t in particleTypes:
+      fname = 'particles_' + str(t) + '_' + str(step) + '.pdb'
+      outfile = open(fname, 'w')
+      for i, p in enumerate(particles):
+	if(p.type == t):
+	  outfile.write(pdb % ('HETATM', i + 1, atom_types[t], 'ATM', i + 1, sf * p.x, sf * p.y, sf * p.z))
+      outfile.close()
+      sys.stdout.write(fname + ' written to disk.\n\n')
+      files_to_delete.append(fname)
+
+    # write out surface normals
+    for t in siteTypes:
+      surface_normals = []
+      conect_pairs = []
+      for p in particles:
+	for s in p.sites:
+	  if(s.type == t and s.bonded != 1):
+	    nx = sn_magn * (s.x - p.x) / p.radius
+	    ny = sn_magn * (s.y - p.y) / p.radius
+	    nz = sn_magn * (s.z - p.z) / p.radius
+	    surface_normals.append((s.x, s.y, s.z, s.x + nx, s.y + ny, s.z + nz))
+      fname = 'surface_normals_' + str(t) + '_' + str(step) + '.pdb'
+      fnorms = open(fname, 'w')
+      ct = 0
+      for x1, y1, z1, x2, y2, z2 in surface_normals:
+	fnorms.write(pdb % ('HETATM', ct + 1, 'C', 'ATM', ct / 2 + 1, x1, y1, z1))
+	fnorms.write(pdb % ('HETATM', ct + 2, 'C', 'ATM', ct / 2 + 1, x2, y2, z2))
+	conect_pairs.append((ct + 1, ct + 2))
+	ct += 2
+      for cp in conect_pairs:
+	fnorms.write('%6s%5d%5d\n' % ('CONECT', cp[0], cp[1]))
+      fnorms.close()
+      sys.stdout.write(fname + ' written to disk.\n\n')
+      files_to_delete.append(fname)
+
+    # write bonds
+    box_side_half = 0.5 * boxSide
+    if (bonds != []):
+      for t in filter(lambda u: u >= 0, siteTypes):
+	fname = 'bonds_' + str(t) + '_' + str(step) + '.pdb'
+	fbonds = open(fname, 'w')
+	conect_pairs = []
+	ct = 0
+	for id1, s1, id2, s2 in bonds:
+	  if(abs(particles[id1].sites[s1].type) == t and abs(particles[id2].sites[s2].type) == t):
+	    x1 = particles[id1].sites[s1].x
+	    y1 = particles[id1].sites[s1].y
+	    z1 = particles[id1].sites[s1].z
+	    x2 = particles[id2].sites[s2].x
+	    y2 = particles[id2].sites[s2].y
+	    z2 = particles[id2].sites[s2].z
+
+	    x12 = x1 - x2
+	    y12 = y1 - y2
+	    z12 = z1 - z2
+            magn = (x12**2 + y12**2 + z12**2)**0.5
+
+            if (magn > box_side_half):
+	      if(x12 >  box_side_half): x12 = x12 - boxSide
+	      if(x12 < -box_side_half): x12 = x12 + boxSide
+	      if(y12 >  box_side_half): y12 = y12 - boxSide
+	      if(y12 < -box_side_half): y12 = y12 + boxSide
+	      if(z12 >  box_side_half): z12 = z12 - boxSide
+	      if(z12 < -box_side_half): z12 = z12 + boxSide
+              fbonds.write(pdb % ('HETATM', ct + 1, 'C', 'ATM', ct / 2 + 1, x1, y1, z1))
+              fbonds.write(pdb % ('HETATM', ct + 2, 'C', 'ATM', ct / 2 + 1, x1 - x12, y1 - y12, z1 - z12))
+              conect_pairs.append((ct + 1, ct + 2))
+              ct += 2
+              fbonds.write(pdb % ('HETATM', ct + 1, 'C', 'ATM', ct / 2 + 1, x2, y2, z2))
+              fbonds.write(pdb % ('HETATM', ct + 2, 'C', 'ATM', ct / 2 + 1, x2 + x12, y2 + y12, z2 + z12))
+              conect_pairs.append((ct + 1, ct + 2))
+              ct += 2
+            else:
+              # extend ends into each particle
+              fac = 0.0
+              nx = fac * x12 / magn
+              ny = fac * y12 / magn
+              nz = fac * z12 / magn
+	      fbonds.write(pdb % ('HETATM', ct + 1, 'C', 'ATM', ct / 2 + 1, x1 + nx, y1 + ny, z1 + nz))
+	      fbonds.write(pdb % ('HETATM', ct + 2, 'C', 'ATM', ct / 2 + 1, x2 - nx, y2 - ny, z2 - nz))
+	      conect_pairs.append((ct + 1, ct + 2))
+	      ct += 2
+	for cp in conect_pairs:
+	  fbonds.write('%6s%5d%5d\n' % ('CONECT', cp[0], cp[1]))
+	fbonds.close()
+	sys.stdout.write(fname + ' written to disk.\n\n')
+	files_to_delete.append(fname)
+
+    # write out box file
+    scaled_L = sf * boxSide
+    fbox = open('box.pdb', 'w')
+    fbox.write(pdb % ('HETATM', 1, 'O', 'ATM', 1, 0.0, 0.0, 0.0))
+    fbox.write(pdb % ('HETATM', 2, 'O', 'ATM', 2, 0.0, 0.0, scaled_L))
+    fbox.write(pdb % ('HETATM', 3, 'O', 'ATM', 3, scaled_L, scaled_L, 0.0))
+    fbox.write(pdb % ('HETATM', 4, 'O', 'ATM', 4, scaled_L, scaled_L, scaled_L))
+    fbox.write(pdb % ('HETATM', 5, 'O', 'ATM', 5, 0.0, scaled_L, 0.0))
+    fbox.write(pdb % ('HETATM', 6, 'O', 'ATM', 6, 0.0, scaled_L, scaled_L)) 
+    fbox.write(pdb % ('HETATM', 7, 'O', 'ATM', 7, scaled_L, 0.0, 0.0))
+    fbox.write(pdb % ('HETATM', 8, 'O', 'ATM', 8, scaled_L, 0.0, scaled_L))
+    fbox.write('%6s%5d%5d\n' % ('CONECT', 1, 2))
+    fbox.write('%6s%5d%5d\n' % ('CONECT', 3, 4))
+    fbox.write('%6s%5d%5d\n' % ('CONECT', 1, 5))
+    fbox.write('%6s%5d%5d\n' % ('CONECT', 1, 7))
+    fbox.write('%6s%5d%5d\n' % ('CONECT', 2, 6))
+    fbox.write('%6s%5d%5d\n' % ('CONECT', 2, 8))
+    fbox.write('%6s%5d%5d\n' % ('CONECT', 3, 5))
+    fbox.write('%6s%5d%5d\n' % ('CONECT', 4, 6))
+    fbox.write('%6s%5d%5d\n' % ('CONECT', 4, 8))
+    fbox.write('%6s%5d%5d\n' % ('CONECT', 5, 6))
+    fbox.write('%6s%5d%5d\n' % ('CONECT', 7, 8))
+    fbox.write('%6s%5d%5d\n' % ('CONECT', 3, 7))
+    fbox.close()
+    sys.stdout.write('box.pdb written to disk.' + '\n\n')
+    files_to_delete.append('box.pdb')
+
+    # create the PyMol script
+    fname = 'M' + str(step) + '.pml'
+    files_to_delete.append(fname)
+    fpymol = open(fname, 'w')
+    fpymol.write('reinitialize\n')
+    fpymol.write('viewport 1280,720\n')
+    fpymol.write('cmd.bg_color("white")\n')
+    fpymol.write('util.performance(0)\n')
+    fpymol.write('rebuild\n')
+    fpymol.write('util.ray_shadows("light")\n')
+
+    if 0:
+      # cubes
+      colors = ['green', 'red', 'blue', 'yellow', 'cyan', 'magenta', 'gray', 'orange', \
+		'forest', 'pink', 'deepteal', 'paleyellow', 'deepblue', 'oxygen', 'hydrogen', 'lightorange', \
+		'lime', 'firebrick', 'lightteal', 'sulfur', 'purpleblue', 'ruby', 'scandium', 'yelloworange']
+    if 1:
+      # tubes
+      colors = ['blue', 'pink', 'magenta', 'gray', 'orange', \
+                'forest', 'pink', 'deepteal', 'paleyellow', 'deepblue', 'oxygen', 'hydrogen', 'lightorange', \
+                'lime', 'firebrick', 'lightteal', 'sulfur', 'purpleblue', 'ruby', 'scandium', 'green', 'red', 'yelloworange']
+      colors[21] = 'yellow'
+      colors[22] = 'orange'
+      #colors = ['blue', 'yellow', 'cyan', 'magenta', 'gray', 'orange', \
+      #          'forest', 'pink', 'deepteal', 'paleyellow', 'deepblue', 'oxygen', 'hydrogen', 'lightorange', \
+      #          'lime', 'firebrick', 'lightteal', 'sulfur', 'purpleblue', 'ruby', 'scandium', 'green', 'red', 'yelloworange']
+
+    if 0:
+      # pyramids and boxes
+      colors = ['green', 'red', 'blue', 'yellow', 'cyan', 'magenta', 'gray', 'orange', \
+                'deepolive', 'pink', 'lightblue', 'paleyellow', 'deepblue', 'oxygen', 'hydrogen', 'lightorange', \
+                'lime', 'firebrick', 'lightteal', 'sulfur', 'purpleblue', 'ruby', 'scandium', 'yelloworange']
+    if 0:
+      colors = ['green', 'red', 'blue', 'yellow', 'cyan', 'magenta', 'gray', 'orange', \
+		'deepolive', 'pink', 'lightblue', 'paleyellow', 'deepblue', 'oxygen', 'hydrogen', 'lightorange', \
+		'lime', 'firebrick', 'lightteal', 'sulfur', 'purpleblue', 'ruby', 'scandium', 'yelloworange']
+      colors += colors
+      colors = ['carbon', 'cyan', 'lightmagenta', 'yellow', 'salmon', 'hydrogen', 'slate', 'orange', \
+		'lime', 'deepteal', 'hotpink', 'yelloworange', 'violetpurple', 'grey70', 'marine', 'olive', \
+		'smudge', 'teal', 'dirtyviolet', 'wheat', 'deepsalmon', 'lightpink', 'aquamarine', 'paleyellow', \
+		'limegreen', 'skyblue', 'warmpink', 'limon', 'violet', 'bluewhite', 'greencyan', 'sand', \
+		'forest', 'lightteal', 'darksalmon', 'splitpea', 'raspberry', 'grey50', 'deepblue', 'brown']
+
+    for t in particleTypes:
+      fpymol.write('load particles_' + str(t) + '_' + str(step) + '.pdb\n')
+      if (len(particleTypes) > len(colors)):
+        fpymol.write('set_color color' + str(t) + ', ' + colors100[t] + '\n')
+        fpymol.write('color color' + str(t) + ', particles_' + str(t) + '_' + str(step) + '\n')
+      else:
+        fpymol.write('color ' + colors[t-colorShift] + ', particles_' + str(t) + '_' + str(step) + '\n')
+      fpymol.write('show spheres, particles_' + str(t) + '_' + str(step) + '\n')
+      fpymol.write('alter elem ' + atom_types[t] + ', vdw=1.0\n')
+    fpymol.write('rebuild\n')
+
+    # load surface normals (loop index t may be negative and zero element is ignored)
+    colors = ['white', 'white', 'green', 'blue', 'pink', 'ruby', 'palegreen', \
+	      'teal', 'olive', 'limon', 'wheat', 'purpleblue', 'red', 'forest', \
+              'hydrogen', 'slate', 'hotpink', 'paleyellow', 'skyblue', 'violetpurple']
+    colors = 100*['white']
+    colors[29] = 'red'
+    colors[30] = 'green'
+    colors[31] = 'red'
+    colors[32] = 'green'
+    colors[-29] = 'lightpink'
+    colors[-30] = 'purple'
+    colors[-31] = 'lightpink'
+    colors[-32] = 'purple'
+    for t in siteTypes:
+      fpymol.write('load surface_normals_' + str(t) + '_' + str(step) + '.pdb\n')
+      if (len(siteTypes) > len(colors)):
+        fpymol.write('set_color color' + str(t) + ', ' + colors100[t] + '\n')
+        fpymol.write('color color' + str(t) + ', surface_normals_' + str(t) + '_' + str(step) + '\n')
+      else:
+        fpymol.write('color ' + colors[t] + ', surface_normals_' + str(t) + '_' + str(step) + '\n')
+      #fpymol.write('set line_width, 3, surface_normals_' + str(t) + '_' + str(step) + '\n')
+      fpymol.write('set line_width, 9, surface_normals_' + str(t) + '_' + str(step) + '\n') # tube CU
+
+    # load bonds
+    colors = ['pink', 'pink', 'purple', 'skyblue', 'white', 'orange', 'smudge', \
+	      'grey50', 'salmon', 'violet', 'warmpink', 'palecyan', 'purpleblue', \
+              'limegreen', 'lightpink', 'teal', 'bluewhite', 'marine', 'sand']
+    colors = 100 * ['forest', 'violetpurple']
+    
+    if(bonds != []):
+      for t in filter(lambda u: u >= 0, siteTypes):
+	fpymol.write('load bonds_' + str(t) + '_' + str(step) + '.pdb\n')
+        if (len(siteTypes) > len(colors)):
+          fpymol.write('set_color color' + str(t) + ', ' + colors100[t] + '\n')
+          fpymol.write('color color' + str(t) + ', bonds_' + str(t) + '_' + str(step) + '\n')
+        else:
+	  fpymol.write('color ' + colors[t] + ', bonds_' + str(t) + '_' + str(step) + '\n')
+          print colors[t]
+	#fpymol.write('set line_width, 3, bonds_' + str(t) + '_' + str(step) + '\n')
+	fpymol.write('set line_width, 13, bonds_' + str(t) + '_' + str(step) + '\n') # tube CU
+        #fpymol.write('move z, %.3f\n' % (0.0  - (50.0)*((step - 330007300) / (330021600*1.0 - 330007300)))) # part 1
+        #thck = 300.0 - 4.0*((step - 330007300) / (330021600*1.0 - 330007300))
+	#fpymol.write('set line_width, ' +str(thck) + ', bonds_' + str(t) + '_' + str(step) + '\n') # tube CU
+
+    # load box
+    fpymol.write('load box.pdb\n')
+    fpymol.write('color black, box\n') if (not unwrap) else fpymol.write('color red, box\n')
+    fpymol.write('set line_width, 2, box\n')
+
+    if (write_label):
+      # write label
+      shft = '%.1f' % (ylabel * 0.5 * boxSide)
+      drct = '/'.join(os.getcwd().split('/')[4:])
+      fpymol.write('pseudoatom lbl\n')
+      fpymol.write('set label_size, 10\n')
+      fpymol.write('set label_position, (0.0, -' + shft + ', ' + shft + ')\n')
+      fpymol.write('label lbl, "' + time.asctime() + ' /' + drct + '/' + f +  '"\n')
+      fpymol.write('cmd.hide("everything","lbl")\n')
+      fpymol.write('cmd.show("labels"    ,"lbl")\n')
+
+    fpymol.write('reset\n')
+    if (view_file): fpymol.write(v)
+    if (png or animate):
+      # next two lines used for pyramids
+      if (3510002400 <= step <= 3510026400):
+        fpymol.write('turn y, %.2f\n' % ((9.0 / 24.0) * (step - 3510002400) / 100))
+        print step, (9.0 / 24.0) * (step - 3510002400) / 100
+      if (3510026400 < step): fpymol.write('turn y, 90\n')
+
+      # /Users/jhalverson/research/nanoparticles/cubes_animation_rotation
+      # 18 degrees per part with 12000 steps hence (18/12)
+      #fpymol.write('turn y, 180\n') # part 1
+      #fpymol.write('turn y, %.3f\n' % (0.0  + (18.0/12.0)*((step - 0)         / 1000.0))) # part 1
+      #fpymol.write('move z, -50\n')
+      #fpymol.write('move z, %.3f\n' % (0.0  - (50.0)*((step - 330007300) / (330021600*1.0 - 330007300)))) # part 1
+      #fpymol.write('turn y, %.3f\n' % (18.0 + (18.0/12.0)*((step - 10000000)  / 1000.0))) # part 2
+      #fpymol.write('turn y, %.3f\n' % (36.0 + (18.0/12.0)*((step - 100000000) / 1000.0))) # part 3
+      #fpymol.write('turn y, %.3f\n' % (54.0 + (18.0/12.0)*((step - 660000000) / 1000.0))) # part 4
+      #fpymol.write('turn y, %.3f\n' % (72.0 + (18.0/12.0)*((step - 1900000000)/ 1000.0))) # part 5
+      if (ray): fpymol.write('ray\n')
+      fpymol.write('png ' + str(step) + '.png\n')
+      if (len(files) > 1): fpymol.write('quit\n')
+    fpymol.close()
+    sys.stdout.write('Wrote out PyMOL file ' + fname + '\n')
+
+    # view in PyMol and remove files
+    arg = ' -c ' if (len(files) > 1) else ' '
+    cmd = '/Applications/MacPyMOL.app/Contents/MacOS/MacPyMOL' + arg + fname
+    ecode = os.system(cmd)
+    if (not leave):
+    #if (True):
+      for fd in files_to_delete:
+	ecode = os.remove(fd)
