@@ -1,6 +1,6 @@
-CC = g++
-CFLAGS = -O3
-COMPILE = $(CC) $(CFLAGS) -c
+CXX = g++
+CXXFLAGS = -O3
+COMPILE = $(CXX) $(CXXFLAGS) -c
 OBJFILES := $(patsubst %.cpp,%.o,$(wildcard *.cpp))
 
 all: mines
